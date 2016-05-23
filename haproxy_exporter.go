@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/csv"
 	"flag"
 	"fmt"
@@ -33,9 +34,9 @@ const (
 )
 
 var (
-	frontendLabelNames = []string{"frontend"}
-	backendLabelNames  = []string{"backend"}
-	serverLabelNames   = []string{"backend", "server"}
+	frontendLabelNames = []string{"pid", "frontend"}
+	backendLabelNames  = []string{"pid", "backend"}
+	serverLabelNames   = []string{"pid", "backend", "server"}
 )
 
 func newFrontendMetric(metricName string, docString string, constLabels prometheus.Labels) *prometheus.GaugeVec {
@@ -121,8 +122,9 @@ var (
 // Exporter collects HAProxy stats from the given URI and exports them using
 // the prometheus metrics package.
 type Exporter struct {
-	URI   string
-	mutex sync.RWMutex
+	UseSocket bool
+	URI       string
+	mutex     sync.RWMutex
 
 	up                                             prometheus.Gauge
 	totalScrapes, csvParseFailures                 prometheus.Counter
@@ -131,9 +133,10 @@ type Exporter struct {
 }
 
 // NewExporter returns an initialized Exporter.
-func NewExporter(uri string, selectedServerMetrics map[int]*prometheus.GaugeVec, timeout time.Duration) *Exporter {
+func NewExporter(socket bool, uri string, selectedServerMetrics map[int]*prometheus.GaugeVec, timeout time.Duration) *Exporter {
 	return &Exporter{
-		URI: uri,
+		UseSocket: socket,
+		URI:       uri,
 		up: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "up",
@@ -244,23 +247,66 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 }
 
 func (e *Exporter) scrape() {
+	r, w := io.Pipe()
+	var reader *csv.Reader
+
 	e.totalScrapes.Inc()
 
-	resp, err := e.client.Get(e.URI)
-	if err != nil {
-		e.up.Set(0)
-		log.Errorf("Can't scrape HAProxy: %v", err)
-		return
+	if e.UseSocket {
+		nbproc := 1
+
+		conn, err := net.Dial("unix", e.URI)
+		if err != nil {
+			e.up.Set(0)
+			log.Errorf("Can't scrape HAProxy: %v", err)
+			return
+		}
+		scanner := bufio.NewScanner(conn)
+		scanner.Split(bufio.ScanWords)
+		fmt.Fprintf(conn, "show info\n")
+		for scanner.Scan() {
+			if scanner.Text() == "Nbproc:" {
+				scanner.Scan()
+				nbproc, _ = strconv.Atoi(scanner.Text())
+			}
+		}
+
+		for n := 1; n <= nbproc; n++ {
+			fmt.Fprintf(conn, "show stat bind-process %d\n", n)
+		loop1:
+			for {
+				var line []byte
+				_, err := conn.Read(line)
+				switch err {
+				case nil:
+				case io.EOF:
+					break loop1
+				}
+				w.Write(line)
+			}
+		}
+
+		reader = csv.NewReader(r)
+
+	} else {
+
+		resp, err := e.client.Get(e.URI)
+		if err != nil {
+			e.up.Set(0)
+			log.Errorf("Can't scrape HAProxy: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		if !(resp.StatusCode >= 200 && resp.StatusCode < 300) {
+			e.up.Set(0)
+			log.Errorf("Can't scrape HAProxy: status %d", resp.StatusCode)
+			return
+		}
+		reader = csv.NewReader(resp.Body)
 	}
-	defer resp.Body.Close()
-	if !(resp.StatusCode >= 200 && resp.StatusCode < 300) {
-		e.up.Set(0)
-		log.Errorf("Can't scrape HAProxy: status %d", resp.StatusCode)
-		return
-	}
+
 	e.up.Set(1)
 
-	reader := csv.NewReader(resp.Body)
 	reader.TrailingComma = true
 	reader.Comment = '#'
 
@@ -315,7 +361,7 @@ func (e *Exporter) parseRow(csvRow []string) {
 		return
 	}
 
-	pxname, svname, type_ := csvRow[0], csvRow[1], csvRow[32]
+	pxname, svname, pid, type_ := csvRow[0], csvRow[1], csvRow[26], csvRow[32]
 
 	const (
 		frontend = "0"
@@ -326,11 +372,11 @@ func (e *Exporter) parseRow(csvRow []string) {
 
 	switch type_ {
 	case frontend:
-		e.exportCsvFields(e.frontendMetrics, csvRow, pxname)
+		e.exportCsvFields(e.frontendMetrics, csvRow, pid, pxname)
 	case backend:
-		e.exportCsvFields(e.backendMetrics, csvRow, pxname)
+		e.exportCsvFields(e.backendMetrics, csvRow, pid, pxname)
 	case server:
-		e.exportCsvFields(e.serverMetrics, csvRow, pxname, svname)
+		e.exportCsvFields(e.serverMetrics, csvRow, pid, pxname, svname)
 	}
 }
 
@@ -397,6 +443,7 @@ func main() {
 	var (
 		listenAddress             = flag.String("web.listen-address", ":9101", "Address to listen on for web interface and telemetry.")
 		metricsPath               = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
+		haProxyUseSocket          = flag.Bool("haproxy.use-socket", false, "Use unix socket instead of HTTP to scrape HAProxy.")
 		haProxyScrapeURI          = flag.String("haproxy.scrape-uri", "http://localhost/;csv", "URI on which to scrape HAProxy.")
 		haProxyServerMetricFields = flag.String("haproxy.server-metric-fields", serverMetrics.String(), "Comma-seperated list of exported server metrics. See http://cbonte.github.io/haproxy-dconv/configuration-1.5.html#9.1")
 		haProxyTimeout            = flag.Duration("haproxy.timeout", 5*time.Second, "Timeout for trying to get stats from HAProxy.")
@@ -418,7 +465,7 @@ func main() {
 	log.Infoln("Starting haproxy_exporter", version.Info())
 	log.Infoln("Build context", version.BuildContext())
 
-	exporter := NewExporter(*haProxyScrapeURI, selectedServerMetrics, *haProxyTimeout)
+	exporter := NewExporter(*haProxyUseSocket, *haProxyScrapeURI, selectedServerMetrics, *haProxyTimeout)
 	prometheus.MustRegister(exporter)
 	prometheus.MustRegister(version.NewCollector("haproxy_exporter"))
 
