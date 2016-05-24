@@ -26,17 +26,17 @@ const (
 	namespace = "haproxy" // For Prometheus metrics.
 
 	// HAProxy 1.4
-	// # pxname,svname,qcur,qmax,scur,smax,slim,stot,bin,bout,dreq,dresp,ereq,econ,eresp,wretr,wredis,status,weight,act,bck,chkfail,chkdown,lastchg,downtime,qlimit,pid,iid,sid,throttle,lbtot,tracked,type,rate,rate_lim,rate_max,check_status,check_code,check_duration,hrsp_1xx,hrsp_2xx,hrsp_3xx,hrsp_4xx,hrsp_5xx,hrsp_other,hanafail,req_rate,req_rate_max,req_tot,cli_abrt,srv_abrt,
+	// # pxname,svname,qcur,qmax,scur,smax,slim,stot,bin,bout,dreq,dresp,ereq,econ,eresp,wretr,wredis,status,weight,act,bck,chkfail,chkdown,lastchg,downtime,qlimit,process,iid,sid,throttle,lbtot,tracked,type,rate,rate_lim,rate_max,check_status,check_code,check_duration,hrsp_1xx,hrsp_2xx,hrsp_3xx,hrsp_4xx,hrsp_5xx,hrsp_other,hanafail,req_rate,req_rate_max,req_tot,cli_abrt,srv_abrt,
 	// HAProxy 1.5
-	// pxname,svname,qcur,qmax,scur,smax,slim,stot,bin,bout,dreq,dresp,ereq,econ,eresp,wretr,wredis,status,weight,act,bck,chkfail,chkdown,lastchg,downtime,qlimit,pid,iid,sid,throttle,lbtot,tracked,type,rate,rate_lim,rate_max,check_status,check_code,check_duration,hrsp_1xx,hrsp_2xx,hrsp_3xx,hrsp_4xx,hrsp_5xx,hrsp_other,hanafail,req_rate,req_rate_max,req_tot,cli_abrt,srv_abrt,comp_in,comp_out,comp_byp,comp_rsp,lastsess,
+	// pxname,svname,qcur,qmax,scur,smax,slim,stot,bin,bout,dreq,dresp,ereq,econ,eresp,wretr,wredis,status,weight,act,bck,chkfail,chkdown,lastchg,downtime,qlimit,process,iid,sid,throttle,lbtot,tracked,type,rate,rate_lim,rate_max,check_status,check_code,check_duration,hrsp_1xx,hrsp_2xx,hrsp_3xx,hrsp_4xx,hrsp_5xx,hrsp_other,hanafail,req_rate,req_rate_max,req_tot,cli_abrt,srv_abrt,comp_in,comp_out,comp_byp,comp_rsp,lastsess,
 	expectedCsvFieldCount = 52
 	statusField           = 17
 )
 
 var (
-	frontendLabelNames = []string{"pid", "frontend"}
-	backendLabelNames  = []string{"pid", "backend"}
-	serverLabelNames   = []string{"pid", "backend", "server"}
+	frontendLabelNames = []string{"process", "frontend"}
+	backendLabelNames  = []string{"process", "backend"}
+	serverLabelNames   = []string{"process", "backend", "server"}
 )
 
 func newFrontendMetric(metricName string, docString string, constLabels prometheus.Labels) *prometheus.GaugeVec {
@@ -361,7 +361,7 @@ func (e *Exporter) parseRow(csvRow []string) {
 		return
 	}
 
-	pxname, svname, pid, type_ := csvRow[0], csvRow[1], csvRow[26], csvRow[32]
+	pxname, svname, process, type_ := csvRow[0], csvRow[1], csvRow[26], csvRow[32]
 
 	const (
 		frontend = "0"
@@ -372,11 +372,11 @@ func (e *Exporter) parseRow(csvRow []string) {
 
 	switch type_ {
 	case frontend:
-		e.exportCsvFields(e.frontendMetrics, csvRow, pid, pxname)
+		e.exportCsvFields(e.frontendMetrics, csvRow, process, pxname)
 	case backend:
-		e.exportCsvFields(e.backendMetrics, csvRow, pid, pxname)
+		e.exportCsvFields(e.backendMetrics, csvRow, process, pxname)
 	case server:
-		e.exportCsvFields(e.serverMetrics, csvRow, pid, pxname, svname)
+		e.exportCsvFields(e.serverMetrics, csvRow, process, pxname, svname)
 	}
 }
 
@@ -447,7 +447,7 @@ func main() {
 		haProxyScrapeURI          = flag.String("haproxy.scrape-uri", "http://localhost/;csv", "URI on which to scrape HAProxy.")
 		haProxyServerMetricFields = flag.String("haproxy.server-metric-fields", serverMetrics.String(), "Comma-seperated list of exported server metrics. See http://cbonte.github.io/haproxy-dconv/configuration-1.5.html#9.1")
 		haProxyTimeout            = flag.Duration("haproxy.timeout", 5*time.Second, "Timeout for trying to get stats from HAProxy.")
-		haProxyPidFile            = flag.String("haproxy.pid-file", "", "Path to haproxy's pid file.")
+		haProxyprocessFile        = flag.String("haproxy.process-file", "", "Path to haproxy's process file.")
 		showVersion               = flag.Bool("version", false, "Print version information.")
 	)
 	flag.Parse()
@@ -469,16 +469,16 @@ func main() {
 	prometheus.MustRegister(exporter)
 	prometheus.MustRegister(version.NewCollector("haproxy_exporter"))
 
-	if *haProxyPidFile != "" {
-		procExporter := prometheus.NewProcessCollectorPIDFn(
+	if *haProxyprocessFile != "" {
+		procExporter := prometheus.NewProcessCollectorprocessFn(
 			func() (int, error) {
-				content, err := ioutil.ReadFile(*haProxyPidFile)
+				content, err := ioutil.ReadFile(*haProxyprocessFile)
 				if err != nil {
-					return 0, fmt.Errorf("Can't read pid file: %s", err)
+					return 0, fmt.Errorf("Can't read process file: %s", err)
 				}
 				value, err := strconv.Atoi(strings.TrimSpace(string(content)))
 				if err != nil {
-					return 0, fmt.Errorf("Can't parse pid file: %s", err)
+					return 0, fmt.Errorf("Can't parse process file: %s", err)
 				}
 				return value, nil
 			}, namespace)
